@@ -1,8 +1,8 @@
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, ToTokens, spanned::Spanned};
 use syn::{
     parse_macro_input, punctuated::Punctuated, DeriveInput, Expr, GenericArgument, Ident,
-    MetaNameValue, Token, Type,
+    MetaNameValue, Token, Type
 };
 
 #[proc_macro_derive(Builder, attributes(builder))]
@@ -12,15 +12,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let builder_ident = format_ident!("{}Builder", command_ident);
 
     let syn::Data::Struct(struct_data) = input.data else { panic!("Only structs are supported") };
-    for name in ["executable", "args", "env", "current_dir"] {
-        if !struct_data
-            .fields
-            .iter()
-            .any(|f| f.ident.clone().unwrap().to_string() == name)
-        {
-            panic!("Missing field {}", name);
-        }
-    }
+
+    let mut err: Option<TokenStream> = None;
 
     let mut setters = quote! {};
     let mut build_func_body = quote! {};
@@ -37,14 +30,20 @@ pub fn derive(input: TokenStream) -> TokenStream {
             
             let name_values: Punctuated<MetaNameValue, Token![,]> = a.parse_args_with(Punctuated::parse_terminated).unwrap();
             for nv in name_values {
-                if nv.path.is_ident("each") {
-                    let Expr::Lit(lit) = nv.value else {
-                        panic!("Failed to parse attribute: attribute value is not a literal");
-                    };
-                    let syn::Lit::Str(lit) = lit.lit else {
-                        panic!("Failed to parse attribute: attribute value is not a string literal");
-                    };
-                    return Some(lit.value());
+                match nv.path.to_token_stream().to_string().as_str() {
+                    "each" => {
+                            let Expr::Lit(lit) = nv.value else {
+                            panic!("Failed to parse attribute: attribute value is not a literal");
+                        };
+                        let syn::Lit::Str(lit) = lit.lit else {
+                            panic!("Failed to parse attribute: attribute value is not a string literal");
+                        };
+                        return Some(lit.value());
+                    }
+                    _ => {
+                        let attr_err = syn::Error::new(a.bracket_token.span.__span(), format!("expected `builder(each = \"...\")`"));
+                        err = Some(attr_err.to_compile_error().into());
+                    }
                 };
             };
             None
@@ -57,7 +56,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 setters = quote! {
                     #setters
                     pub fn #vec_func_name(&mut self, value: #field_optional_type) -> &mut Self {
-                        self.#field_name = Some(value);
+                        self.#field_name = std::option::Option::Some(value);
                         self
                     }
                 };
@@ -67,7 +66,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 };
                 builder_init_body = quote! {
                     #builder_init_body
-                    #field_name: None,
+                    #field_name: std::option::Option::None,
                 };
                 build_func_body = quote! {
                     #build_func_body
@@ -110,17 +109,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     setters = quote! {
                         #setters
                         pub fn #vec_func_name(&mut self, value: #field_type) -> &mut Self {
-                            self.#field_name = Some(value);
+                            self.#field_name = std::option::Option::Some(value);
                             self
                         }
                     };
                     builder_struct_body = quote! {
                         #builder_struct_body
-                        #field_name: Option<#field_type>,
+                        #field_name: std::option::Option<#field_type>,
                     };
                     builder_init_body = quote! {
                         #builder_init_body
-                        #field_name: None,
+                        #field_name: std::option::Option::None,
                     };
                     build_func_body = quote! {
                         #build_func_body
@@ -147,14 +146,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl #builder_ident {
             #setters
 
-            pub fn build(&mut self) -> Result<#command_ident, Box<dyn std::error::Error>> {
-                Ok(#command_ident {
+            pub fn build(&mut self) -> std::result::Result<#command_ident, std::boxed::Box<dyn std::error::Error>> {
+                std::result::Result::Ok(#command_ident {
                     #build_func_body
                 })
             }
         }
     };
-
+    
+    if let Some(err) = err {
+        return err;
+    }
     TokenStream::from(expanded)
 }
 
